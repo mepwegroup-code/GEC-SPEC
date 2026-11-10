@@ -1,0 +1,82 @@
+name: Restore GEC Specifications source and verify Next.js
+on:
+  push:
+    paths:
+      - ".github/workflows/bootstrap-source.yml"
+      - "GEC-SPEC_Vercel_GitHub_Ready.zip"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Restore checked source from archive to Vercel root
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path, PurePosixPath
+          import zipfile
+          archive = Path("GEC-SPEC_Vercel_GitHub_Ready.zip")
+          if not archive.is_file():
+              raise SystemExit("Missing the committed source archive")
+          written = []
+          with zipfile.ZipFile(archive) as z:
+              for info in z.infolist():
+                  if info.is_dir():
+                      continue
+                  parts = PurePosixPath(info.filename).parts
+                  if len(parts) < 3 or parts[0] != "GEC-SPEC" or any(p in ("..", "") for p in parts):
+                      # Root-level documentation uses 2 components.
+                      if len(parts) != 2 or parts[0] != "GEC-SPEC" or parts[1] not in ("README.md", ".gitignore", "DEPLOY_VERCEL.md", "VERIFICATION.md"):
+                          continue
+                  relative = parts[1:]
+                  if relative[0] == "frontend":
+                      relative = relative[1:]
+                  elif relative[0] not in ("backend", "supabase", "README.md", ".gitignore", "DEPLOY_VERCEL.md", "VERIFICATION.md"):
+                      continue
+                  if not relative:
+                      continue
+                  dest = Path(*relative)
+                  if dest.is_absolute() or ".." in dest.parts or str(dest).startswith(".github"):
+                      raise SystemExit("Unsafe archive member: " + info.filename)
+                  dest.parent.mkdir(parents=True, exist_ok=True)
+                  dest.write_bytes(z.read(info))
+                  written.append(str(dest))
+          if not Path("package.json").is_file() or not Path("app/page.tsx").is_file() or not Path("backend/app/main.py").is_file():
+              raise SystemExit("Archive is missing Next.js frontend or FastAPI backend")
+          Path("vercel.json").write_text('{"$schema":"https://openapi.vercel.sh/vercel.json","framework":"nextjs","buildCommand":"npm run build","installCommand":"npm install --no-audit --no-fund"}\n', encoding="utf-8")
+          print("Restored", len(written), "source files with Next.js at repo root")
+          PY
+      - name: Install frontend dependencies
+        run: npm install --no-audit --no-fund
+      - name: Typecheck and production build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+        run: |
+          npm run lint
+          npm run build
+      - name: Commit verified source for automatic Vercel deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "fix(deploy): unpack Next.js source at Vercel root and configure build"
+            git push origin HEAD:main
+          else
+            echo "Source already up to date"
+          fi
